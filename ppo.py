@@ -3,32 +3,30 @@ import numpy as np
 import tensorflow_probability as tfp
 import gym
 from baselines.common.vec_env.subproc_vec_env import SubprocVecEnv
+from baselines.common.vec_env.vec_normalize import VecNormalize
 import time
+np.set_printoptions(threshold=999999)
 #HYPERPARAMETERS
 INITIALIZER = tf.glorot_uniform_initializer
-CLIPPINGPARAMETER = .2
+CLIPPINGPARAMETER = 0.2
 ACTOR_LEARN_RATE = 0.0003
-CRITIC_LEARN_RATE = 0.0001
-OPTIMIZATION_BATCH_SIZE = 1000
-CREATION_BATCH_SIZE = 16
-CREATION_STEPS = 4000
+CRITIC_LEARN_RATE = 0.0005
+OPTIMIZATION_BATCH_SIZE = 256
+CREATION_BATCH_SIZE = 8
+CREATION_STEPS = 2000
 GAMMA = 0.97
-ADVANTAGE_FUNCTION = 'Advantages'
+GAE_LAMBDA = 0.95
+ADVANTAGE_FUNCTION = 'Generalized_Advantages'
 ACTION_ACTIVATION = tf.nn.tanh
 ITERATIONS = 1000
 EPOCHS = 5
-ENTROPY_LOSS_FACTOR = .01
+ENTROPY_LOSS_FACTOR = 0.005
 KL_EARLY_STOPPING = 0.05
 #ADVANTAGE_FUNCTION = 'Generalized_Advantages'
 
 ##NOTES
 #This uses tanh for actions now
 #Implements PPO
-#Printing but not using KL divergence for early stopping right tensorflow
-#Now normalizing advantages
-#TODO: Why not use early stopping? Seems very very viable
-#TODO: Maybe use Normalizing Wrapper for SubprocVecEnv
-#TODO
 class Network:
     def __init__(self, input_size=None, layers=None, outputs=None, name=None):
         """
@@ -47,7 +45,7 @@ class Network:
         self.layer_list = []
         self.output_list = []
 
-        #TODO
+        #input placeholder
         self.input_placeholder = tf.placeholder(tf.float32, shape=(None, input_size), name='input_placeholder')
 
         #Create layers
@@ -67,6 +65,7 @@ class Network:
     def _fully_connected_layer(self, input, input_size, size, activation, name):
 
         """
+        Used for Network models, implements a single fully connected layer
         Takes batch of observations, applies a fully connected layer to it
         input (tensor): Input tensor
         input_size (tensor): size of input tensor at it's last dimension
@@ -82,7 +81,7 @@ class Network:
         self.save_list.append(bias)
         self.save_list.append(weights)
 
-        drive = tf. matmul(input, weights) + bias
+        drive = tf.matmul(input, weights) + bias
 
         return drive if activation==None else activation(drive)
 
@@ -97,19 +96,29 @@ class PPO_model:
             'size' : number of units in layer
             'activation function': activation function for layer
         """
+        #String used by gym to create environment
         self.env_name = env_name
 
-        self.environments = SubprocVecEnv([self.env_function for env in range(CREATION_BATCH_SIZE)])
-        #self.environments.reset()
+        #core is a parallelized model of the environments, environments is inside a normalizing wrapper, that uses an updating average
+        self.env_core = SubprocVecEnv([self.env_function for env in range(CREATION_BATCH_SIZE)])
+        self.environments = VecNormalize(self.env_core)
+        # If not want to use the normalizing wrapper:
+        #self.environments = self.env_core
+        self.environments.reset()
+
+        #Input size and output size of network
         self.input_size = len(self.env_function().observation_space.high)
         self.output_size = len(self.env_function().action_space.high)
 
+        #The tensorflow model
         self.session = tf.Session()
-        self.actor = Network(self.input_size, actor_description, [{'size': self.output_size,'activation':ACTION_ACTIVATION}, {'size': self.output_size, 'activation': tf.nn.softplus}], 'actor')
+        self.actor = Network(self.input_size, actor_description, [{'size': self.output_size,'activation':ACTION_ACTIVATION}, {'size': self.output_size, 'activation': tf.nn.sigmoid}], 'actor')
         self.critic = Network(self.input_size, critic_description, [{'size':1, 'activation':None}], 'critic')
 
+        #The list of variables, which should be saved
         self.save_list = self.actor.save_list + self.critic.save_list
 
+        # THis has to be normal for the entropy to be correctly computed! If you change this, also change entropy computation
         self.action_distribution = tfp.distributions.Normal(self.actor.output_list[0], self.actor.output_list[1])
         self.value_prediction = self.critic.output_list[0]
         #placeholders for training
@@ -142,6 +151,7 @@ class PPO_model:
         data = self.create_data()
         self.train_on_samples(data)
 
+
     def create_data(self):
 
         observation = self.environments.reset()
@@ -171,14 +181,14 @@ class PPO_model:
         observation_array = np.stack(observation_list)
         action_array = np.stack(action_list)
         log_prob_array = np.stack(log_prob_list)
-        value_estimate_array = np.stack(value_estimate_list)
+        value_estimate_array = np.squeeze(np.stack(value_estimate_list))
         reward_array = np.stack(reward_list)
         value_target_array = self.compute_values(reward_array, done_array)
         advantage_array = None
         if ADVANTAGE_FUNCTION == 'Advantages':
-            advantage_array = self.compute_advantages(value_target_array, value_estimate_array)
+            advantage_array = self.compute_advantages(value_estimate_array, reward_array, done_array)
         elif ADVANTAGE_FUNCTION == 'Generalized_Advantages':
-            advantage_array = self.compute_generalized_advantage_estimations(reward_array, value_target_array, value_estimate_array, dones)
+            advantage_array = self.compute_generalized_advantage_estimations(value_estimate_array, reward_array, done_array)
 
         #Write down how good we are now on avaerage
         self.reward_logger.append(np.mean(reward_array))
@@ -188,7 +198,8 @@ class PPO_model:
         sample_number = CREATION_STEPS*CREATION_BATCH_SIZE
 
         print(str(num_finished_samples) + ' out of ' + str(sample_number) + 'usable')
-
+        print(str(num_finished_samples/np.sum(done_array)) + ' steps per run')
+        #print(list(zip(value_estimate_array[0:200,1].tolist(), value_target_array[0:200,1].tolist())))
         observation_array = np.reshape(observation_array, (sample_number, self.input_size))
         action_array = np.reshape(action_array, (sample_number, self.output_size))
         log_prob_array = np.reshape(log_prob_array, (sample_number))
@@ -196,14 +207,15 @@ class PPO_model:
         value_target_array = np.reshape(value_target_array, (sample_number))
         advantage_array = np.reshape(advantage_array, (sample_number))
         finished_samples = np.reshape(finished_samples, (sample_number))
-
+        #print(list(zip(value_target_array[0:500].tolist(), np.reshape(done_array, (sample_number))[0:500].tolist(), np.reshape(reward_array,(sample_number)).tolist())))
         observation_array = observation_array[finished_samples]
         action_array = action_array[finished_samples]
         log_prob_array = log_prob_array[finished_samples]
         value_estimate_array = value_estimate_array[finished_samples]
         value_target_array = value_target_array[finished_samples]
         advantage_array = advantage_array[finished_samples]
-
+        print('Targets: Mean: ' + str(np.mean(value_target_array)) + ' Std: ' + str(np.std(value_target_array)))
+        print('Estimates: Mean: ' + str(np.mean(value_estimate_array)) + ' Std: ' + str(np.std(value_estimate_array)))
         data = {'observations':observation_array, 'advantages':advantage_array, 'old_actions':action_array, 'old_log_probs':log_prob_array, 'target_values':value_target_array, 'data_length':num_finished_samples}
         return data
 
@@ -211,23 +223,32 @@ class PPO_model:
         """
         data (dict) : Has keys: 'advantages', 'old_actions', 'old_log_probs', 'target_values'
         """
-        #Maybe split actor and critic training completely?
+
+        # approx kl is used for early stopping: Once difference between old and new policy get too large, break the training, start new iteration
         approx_kl = 0
+
+        #Training Loop
         for epoch in range(EPOCHS):
+            #data is split into minibatches
             mini_batch_list = self.generate_minibatches(data)
             for mini_batch in mini_batch_list:
+                #Optimize network
                 fetches = self.session.run(self.retrieve_list, feed_dict = mini_batch)
-                #This ignores the last three outputs, they are the train steps and finally approx_kl and should not be logged
+                #Approx KL is used for early stopping, get latest KL
                 approx_kl = fetches[-1]
-                #print('approx_kl' + str(fetches[-1]))
-                #print('approx_kl' + str(fetches[-1]))
+                #Get entries for logging, which can be used for visualization and/or debugging
                 logging_fetches = fetches[0:len(self.logger_keys)]
                 self.update_minibatch_logger(logging_fetches)
+                #Early stopping if KL is too big
+                print(approx_kl)
                 if approx_kl > KL_EARLY_STOPPING:
                     break
+            #Update Logger
             self.update_epoch_logger()
+            #Early stopping
             if approx_kl > KL_EARLY_STOPPING:
                 break
+        #Update Logger
         self.update_iteration_logger()
 
 
@@ -245,8 +266,9 @@ class PPO_model:
         Returns:
             minibatch_list with feed_dicts, each of length of OPTIMIZATION_BATCH_SIZE
         """
-        #Does not have data_length for obvious reasons, observations are handled seperately, as the data structure prefers this
+        #Does not have data_length , as this has to be handled alone
         data_key_list = ['advantages','old_actions','old_log_probs','target_values']
+        #List of placeholders, that need feeding
         placeholder_list = [self.advantage_placeholder, self.old_action_placeholder, self.old_log_prob_placeholder, self.value_target_placeholder]
 
         #Shuffle data
@@ -254,11 +276,11 @@ class PPO_model:
         for key in data_key_list:
             data[key] = data[key][random_permutation]
 
+        #Slice data into minibatches
         mini_batch_list = []
         indices = range(0,data['data_length'], OPTIMIZATION_BATCH_SIZE)
         for start_index in indices:
             end_index = start_index + OPTIMIZATION_BATCH_SIZE
-            #Make sure indexing works
             minibatch_dict = self.feed_dictionary(data['observations'][start_index:end_index])
             for data_key, feed_key in zip(data_key_list, placeholder_list):
                 minibatch_dict[feed_key] = data[data_key][start_index:end_index]
@@ -270,18 +292,24 @@ class PPO_model:
         action of size [batch_size, action_size]
         log_probs are logarithm probabilities, size[batch_size]
         """
+        #Sample actions
         actions = self.action_distribution.sample()
+        #Get (logarithmic) probabilites of actions
         log_probs = self.action_distribution.log_prob(actions)
+        #Sum over individual action components (--> Multiplication in log space is addition!)
         log_probs = tf.reduce_sum(log_probs, -1)
         return actions, log_probs
 
     def value_loss(self):
+        #Compute Mean square error for critic training
         value_f_loss = tf.square(self.value_prediction - self.value_target_placeholder)
         loss = tf.reduce_mean(value_f_loss)
         return loss
 
 
     def clipped_ppo_objective(self):
+        #Clipped objective function from PPO Paper
+        #Probability ratio of old and new parameters
         prob_ratio = tf.exp(tf.reduce_sum(self.action_distribution.log_prob(self.old_action_placeholder), axis=-1)-self.old_log_prob_placeholder)
         clipped_prop_ratio = tf.clip_by_value(prob_ratio, 1-CLIPPINGPARAMETER, 1+CLIPPINGPARAMETER)
         clipped_objective = tf.minimum(prob_ratio*self.advantage_placeholder, clipped_prop_ratio*self.advantage_placeholder)
@@ -289,7 +317,9 @@ class PPO_model:
         return loss
 
     def approx_entropy_loss(self):
-        entropy_loss = tf.reduce_mean(self.action_distribution.log_prob(self.old_action_placeholder))
+        entropy = tf.reduce_mean(self.action_distribution.entropy())
+        #entropy = - tf.reduce_mean(self.action_distribution.log_prob(self.old_action_placeholder))
+        entropy_loss = -entropy
         return entropy_loss
 
     def policy_loss(self):
@@ -369,25 +399,45 @@ class PPO_model:
         values = np.flip(values,axis=0)
         return values
 
-    def compute_advantages(self, values, value_estimations):
-        advantages = values - np.squeeze(value_estimations)
+    def compute_advantages(self, value_estimations, rewards, dones):
+        value_estimations = np.squeeze(value_estimations)
+        value_state_t =value_estimations
+        value_state_t_plus_one = np.append(value_estimations, np.zeros((1,CREATION_BATCH_SIZE)), axis=0)[1:]
+        value_state_t_plus_one[dones] = 0
+        advantages = rewards + GAMMA*value_state_t_plus_one - value_state_t
         #Normalize advantages
-        advantages = advantages - np.mean(advantages)
+        #advantages = advantages - np.mean(advantages)
         advantages = advantages/np.std(advantages)
         return advantages
 
 #TODO Generalized advantage Estimation
-    """
-    def compute_generalized_advantage_estimations(self, rewards, , values, value_estimations, dones):
+
+    def compute_generalized_advantage_estimations(self, value_estimations, rewards, dones):
+        value_estimations = np.squeeze(value_estimations)
+        #print(value_estimations.shape)
         assert rewards.shape == value_estimations.shape
         assert rewards.shape == dones.shape
-        deltas = np.zeros(rewards.shape)
-        rewards = np.flip(rewards,axis=0)
-        value_estimations = np.flip(rewards, axis=0)
-        dones = np.flip(dones.flip(dones,axis=0))
+        value_estimations = np.squeeze(value_estimations)
+        value_state_t =value_estimations
+        value_state_t_plus_one = np.append(value_estimations, np.zeros((1,CREATION_BATCH_SIZE)), axis=0)[1:]
+        value_state_t_plus_one[dones] = 0
+        deltas = rewards + GAMMA*value_state_t_plus_one - value_state_t
 
-        for i in range(CREATION_STEPS):
-    """
+        advantages = np.zeros((CREATION_STEPS, CREATION_BATCH_SIZE))
+        gamma_lambda = GAMMA*GAE_LAMBDA
+        accumulated_advantage = np.zeros((1,CREATION_BATCH_SIZE))
+        for j in range(CREATION_STEPS):
+            i = (j+1)*-1
+            accumulated_advantage = gamma_lambda * accumulated_advantage
+            accumulated_advantage[np.expand_dims(dones[i,:], axis=0)] = 0
+            accumulated_advantage = accumulated_advantage + deltas[i,:]
+            advantages[i,:] = accumulated_advantage
+        #Normalize advantages
+        #advantages = advantages - np.mean(advantages)
+        advantages = advantages/np.std(advantages)
+        return advantages
+
+
     def save(self, file_name):
         stub = None
     #TODO
@@ -404,16 +454,37 @@ class PPO_model:
             finished_samples[-(i+1)] = run_done
         return finished_samples
 
+    def evaluate(self):
+        observation = self.env_core.reset()
+        action_fetch, log_prob_fetch = self.sample_action()
+        fetch_list = [action_fetch, log_prob_fetch, self.value_prediction]
+        reward_list = []
+        sigma_list = []
+        for step in range(CREATION_STEPS):
+            feed_dict = self.feed_dictionary(observation)
+            action, log_prob, value_estimate = self.session.run(fetch_list, feed_dict=feed_dict)
+            sigma = self.session.run(self.actor.output_list[-1], feed_dict = feed_dict)
+            sigma_list.append(sigma)
+            self.env_core.step_async(action)
+            observation, reward, done, info = self.env_core.step_wait()
+            reward_list.append(reward)
+        reward_array = np.stack(reward_list)
+        return [np.mean(reward_array), np.mean(np.stack(sigma_list))]
 
 def main():
-    network_description = [{'size':32, 'activation':tf.nn.relu}, {'size':64, 'activation':tf.nn.relu},{'size':64, 'activation':tf.nn.relu}]
+    network_description = [{'size':256, 'activation':tf.nn.relu}, {'size':256, 'activation':tf.nn.relu},{'size':256, 'activation':tf.nn.relu}]
     trainer = PPO_model(network_description, network_description, 'LunarLanderContinuous-v2')
+    evaluations = []
     for i in range(ITERATIONS):
         trainer.train()
-        print('results: ')
+        if i%5==0:
+            evaluations.append(trainer.evaluate())
+            print('Evaluation: ')
+            print(evaluations)
+        #print('results: ')
         #print(trainer.epoch_logger)
-        print(trainer.reward_logger)
-        print('logger: ')
-        print(trainer.minibatch_logger[-2])
+        #print(trainer.reward_logger)
+        #print('logger: ')
+        #print(trainer.minibatch_logger[-2])
 if __name__ == '__main__':
     main()
