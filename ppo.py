@@ -5,6 +5,7 @@ import gym
 from baselines.common.vec_env.subproc_vec_env import SubprocVecEnv
 from baselines.common.vec_env.vec_normalize import VecNormalize
 import time
+import matplotlib.pyplot as plt
 np.set_printoptions(threshold=999999)
 #HYPERPARAMETERS
 INITIALIZER = tf.glorot_uniform_initializer
@@ -22,6 +23,7 @@ ITERATIONS = 1000
 EPOCHS = 5
 ENTROPY_LOSS_FACTOR = 0.005
 KL_EARLY_STOPPING = 0.05
+EVALUATION_STEPS = 500
 #ADVANTAGE_FUNCTION = 'Generalized_Advantages'
 
 ##NOTES
@@ -240,7 +242,6 @@ class PPO_model:
                 logging_fetches = fetches[0:len(self.logger_keys)]
                 self.update_minibatch_logger(logging_fetches)
                 #Early stopping if KL is too big
-                print(approx_kl)
                 if approx_kl > KL_EARLY_STOPPING:
                     break
             #Update Logger
@@ -327,7 +328,7 @@ class PPO_model:
 
     def approximate_kl_divergence(self):
         #Computes the approximate kl div between old and new log probs for early stopping
-        return [tf.reduce_mean(self.old_log_prob_placeholder-tf.reduce_sum(self.action_distribution.log_prob(self.old_action_placeholder), axis=-1))]
+        return [tf.reduce_mean(tf.reduce_sum(self.action_distribution.log_prob(self.old_action_placeholder), axis=-1) - self.old_log_prob_placeholder)]
 
     def feed_dictionary(self, observation, old_action=None, old_log_prob=None, value_target=None):
         feed_dict = {self.actor.input_placeholder : observation, self.critic.input_placeholder : observation}
@@ -460,12 +461,15 @@ class PPO_model:
         fetch_list = [action_fetch, log_prob_fetch, self.value_prediction]
         reward_list = []
         sigma_list = []
-        for step in range(CREATION_STEPS):
+        for step in range(EVALUATION_STEPS):
             feed_dict = self.feed_dictionary(observation)
             action, log_prob, value_estimate = self.session.run(fetch_list, feed_dict=feed_dict)
             sigma = self.session.run(self.actor.output_list[-1], feed_dict = feed_dict)
             sigma_list.append(sigma)
+            self.env_core.get_images()
             self.env_core.step_async(action)
+            #plt.imshow(self.env_core.get_images()[0])
+            #time.sleep(0.1)
             observation, reward, done, info = self.env_core.step_wait()
             reward_list.append(reward)
         reward_array = np.stack(reward_list)
