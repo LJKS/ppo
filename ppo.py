@@ -21,8 +21,8 @@ ADVANTAGE_FUNCTION = 'Generalized_Advantages'
 ACTION_ACTIVATION = tf.nn.tanh
 ITERATIONS = 1000
 EPOCHS = 5
-ENTROPY_LOSS_FACTOR = 0.005
-KL_EARLY_STOPPING = 0.05
+ENTROPY_LOSS_FACTOR = 0.01
+KL_EARLY_STOPPING = 0.03
 EVALUATION_STEPS = 500
 #ADVANTAGE_FUNCTION = 'Generalized_Advantages'
 
@@ -83,9 +83,10 @@ class Network:
         self.save_list.append(bias)
         self.save_list.append(weights)
 
-        drive = tf.matmul(input, weights) + bias
+        linear = tf.matmul(input, weights)
+        drive = linear + bias
 
-        return drive if activation==None else activation(drive)
+        return linear if activation==None else activation(drive)
 
 class PPO_model:
     def __init__(self, actor_description, critic_description, env_name, save_file=None):
