@@ -133,7 +133,7 @@ class PPO_model:
 
         #The tensorflow model
         self.session = tf.Session()
-        self.actor = Network(self.input_size, actor_description, [{'size': self.output_size,'activation':ACTION_ACTIVATION}, {'size': self.output_size, 'activation': tf.nn.sigmoid}], 'actor')
+        self.actor = Network(self.input_size, actor_description, [{'size': self.output_size,'activation':ACTION_ACTIVATION}, {'size': self.output_size, 'activation': tf.nn.softplus}], 'actor')
         self.critic = Network(self.input_size, critic_description, [{'size':1, 'activation':None}], 'critic')
 
         #The list of variables, which should be saved
@@ -283,7 +283,7 @@ class PPO_model:
                 #Get entries for logging, which can be used for visualization and/or debugging
                 logging_fetches = fetches[0:len(self.logger_keys)]
                 self.update_minibatch_logger(logging_fetches)
-                print(approx_kl)
+                #print(approx_kl)
                 #Early stopping if KL is too big
                 if (approx_kl > KL_EARLY_STOPPING) and self.iteration > 10 :
                     break
@@ -539,7 +539,7 @@ class PPO_model:
         return [np.mean(reward_array), np.mean(np.stack(sigma_list))]
 
 def main():
-    network_description = [{'size':64, 'activation':tf.nn.relu}, {'size':128, 'activation':tf.nn.relu},{'size':128, 'activation':tf.nn.relu}]
+    network_description = [{'size':128, 'activation':tf.nn.tanh}, {'size':1024, 'activation':tf.nn.tanh},{'size':1024, 'activation':tf.nn.tanh}]
     trainer = PPO_model(network_description, network_description, 'LunarLanderContinuous-v2')
     evaluations = []
     for i in range(ITERATIONS):
