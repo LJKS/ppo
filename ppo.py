@@ -10,7 +10,7 @@ np.set_printoptions(threshold=999999)
 
 #HYPERPARAMETERS
 #Initializer for weights and biases
-INITIALIZER = tf.initializers.random_uniform(-.2,.2)
+INITIALIZER = tf.glorot_uniform_initializer
 #Clipping parameter from PPO
 CLIPPINGPARAMETER = 0.2
 #Learn rate for actor
@@ -20,13 +20,13 @@ CRITIC_LEARN_RATE = 0.0003
 #Batch size in optimization for actor and critic
 OPTIMIZATION_BATCH_SIZE = 256
 #Batch size and number of subprocesses for parallel computation of environments
-CREATION_BATCH_SIZE = 16
+CREATION_BATCH_SIZE = 8
 #Number of steps taken total in creation of samples for one iteration
 CREATION_STEPS = 2000
 #Gamma value discount
-GAMMA = 0.95
+GAMMA = 0.999
 #Lambda discount for GAE
-GAE_LAMBDA = 0.9
+GAE_LAMBDA = 0.95
 #Which advantage function to use (Advantage or GAE)
 ADVANTAGE_FUNCTION = 'Generalized_Advantages'
 #Activation function for actions
@@ -36,14 +36,16 @@ ITERATIONS = 1000
 #Number of epochs in optimization
 EPOCHS = 5
 #Multiplicative factor for entropy loss
-ENTROPY_LOSS_FACTOR = 0.01
+ENTROPY_LOSS_FACTOR = 0.03
 #Early stopping stops when approx KL is larget than this
-KL_EARLY_STOPPING = 0.03
+KL_EARLY_STOPPING = .3
+#How many iterations the early stopping is not used in the beginning
+BURN_IN_ITERATIONS = 5
 #How many steps to use in evaluation (also steps that might be visualized)
 EVALUATION_STEPS = 500
 
 #Whether to visualize during evaluation
-VISUALIZE = False
+VISUALIZE = True
 
 #Network is implementing a feed forward network with possibly several outputs
 class Network:
@@ -59,6 +61,7 @@ class Network:
                 'activation': activation function for respective layer
             name (str) : String naming the network
         """
+
         self.name = name
         self.save_list = []
         self.layer_list = []
@@ -127,7 +130,7 @@ class PPO_model:
 
         #self.normalized_environments = VecNormalize(self.env_core, cliprew = 100.)
         #self.normalized_environments.reset()
-        #If you change this back, then oyu also got to change line 224
+        #If you change this back, then oyu also got to change line 218 or so
         self.normalized_environments = self.env_core
 
         #Input size and output size of network
@@ -150,7 +153,7 @@ class PPO_model:
         self.advantage_placeholder = tf.placeholder(tf.float32, shape=(None), name='advantage_placeholder')
         self.old_action_placeholder = tf.placeholder(tf.float32, shape=(None, self.output_size), name='old_action_placeholder')
         self.old_log_prob_placeholder = tf.placeholder(tf.float32, shape=(None), name='old_log_prob_placeholder')
-        self.value_target_placeholder = tf.placeholder(tf.float32, shape=(None), name='value_target_placeholder')
+        self.value_target_placeholder = tf.placeholder(tf.float32, shape=(None,1), name='value_target_placeholder')
 
 
 
@@ -213,6 +216,12 @@ class PPO_model:
         log_prob_array = np.stack(log_prob_list)
         value_estimate_array = np.squeeze(np.stack(value_estimate_list))
         reward_array = np.stack(reward_list)
+        #self.reward_logger.append(np.mean(reward_array) * np.sqrt(self.normalized_environments.ret_rms.var + self.normalized_environments.epsilon))
+        self.reward_logger.append(np.mean(reward_array))
+        #normalize reward array
+        reward_array = reward_array - np.mean(reward_array)
+        reward_array = reward_array/np.std(reward_array)
+
         value_target_array = self.compute_values(reward_array, done_array)
         advantage_array = None
         if ADVANTAGE_FUNCTION == 'Advantages':
@@ -222,8 +231,6 @@ class PPO_model:
 
         #Write down how good we are now on avaerage
         #But since VecNormalize is used, this has to be scaled by the normalizing factor, the normalizationfactor is taken from
-        #self.reward_logger.append(np.mean(reward_array) * np.sqrt(self.normalized_environments.ret_rms.var + self.normalized_environments.epsilon))
-        self.reward_logger.append(np.mean(reward_array))
         #From here on only the finished samples will be used, that is the samples from runs, where a final state has been reached
         finished_samples = self.compute_finished_samples(done_array)
         num_finished_samples = np.sum(finished_samples)
@@ -246,6 +253,8 @@ class PPO_model:
         log_prob_array = log_prob_array[finished_samples]
         value_estimate_array = value_estimate_array[finished_samples]
         value_target_array = value_target_array[finished_samples]
+        #Output of network has size [Batchsize,1], so this has to be reshaped respectively
+        value_target_array = np.expand_dims(value_target_array,-1)
         advantage_array = advantage_array[finished_samples]
 
         #This is debug utility
@@ -281,6 +290,15 @@ class PPO_model:
                 print(self.session.run(self.value_target_placeholder, feed_dict = mini_batch).shape)
                 """
                 fetches = self.session.run(self.retrieve_list, feed_dict = mini_batch)
+                #Debug
+                """
+                print('debug_val_loss')
+                print(self.session.run(self.debug_val_loss(), feed_dict=mini_batch).shape)
+                print('pred_shape')
+                print(self.session.run(self.value_prediction, feed_dict=mini_batch).shape)
+                print('target_shape')
+                print(self.session.run(self.value_target_placeholder, feed_dict=mini_batch).shape)
+                """
                 #Approx KL is used for early stopping, get latest KL
                 approx_kl = fetches[-1]
                 #Get entries for logging, which can be used for visualization and/or debugging
@@ -288,12 +306,13 @@ class PPO_model:
                 self.update_minibatch_logger(logging_fetches)
                 #print(approx_kl)
                 #Early stopping if KL is too big
-                if (approx_kl > KL_EARLY_STOPPING) and self.iteration > 10 :
+                if (approx_kl > KL_EARLY_STOPPING) and self.iteration > BURN_IN_ITERATIONS :
+                    print('break cause KL')
                     break
             #Update Logger
             self.update_epoch_logger()
             #Early stopping
-            if (approx_kl > KL_EARLY_STOPPING) and self.iteration > 10:
+            if (approx_kl > KL_EARLY_STOPPING) and self.iteration > BURN_IN_ITERATIONS:
                 break
         #Update Logger
         self.update_iteration_logger()
@@ -349,6 +368,10 @@ class PPO_model:
         #Sum over individual action components (--> Multiplication in log space is addition!)
         log_probs = tf.reduce_sum(log_probs, -1)
         return actions, log_probs
+
+    def debug_val_loss(self):
+        value_f_loss = tf.square(self.value_prediction - self.value_target_placeholder)
+        return value_f_loss
 
     def value_loss(self):
         #Compute Mean square error for critic training
@@ -498,7 +521,7 @@ class PPO_model:
             accumulated_advantage = accumulated_advantage + deltas[i,:]
             advantages[i,:] = accumulated_advantage
         #Normalize advantages
-        #advantages = advantages - np.mean(advantages)
+        advantages = advantages - np.mean(advantages)
         advantages = advantages/np.std(advantages)
         return advantages
 
@@ -544,7 +567,7 @@ class PPO_model:
         return [np.mean(reward_array), np.mean(np.stack(sigma_list))]
 
 def main():
-    network_description = [{'size':16, 'activation':tf.nn.tanh}, {'size':16, 'activation':tf.nn.tanh},{'size':16, 'activation':tf.nn.tanh}, {'size':16, 'activation':tf.nn.tanh}, {'size':16, 'activation':tf.nn.tanh}, {'size':16, 'activation':tf.nn.tanh}]
+    network_description = [{'size':128, 'activation':tf.nn.tanh}, {'size':256, 'activation':tf.nn.tanh}, {'size':256, 'activation':tf.nn.tanh}]
     trainer = PPO_model(network_description, network_description, 'LunarLanderContinuous-v2')
     evaluations = []
     for i in range(ITERATIONS):
