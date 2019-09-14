@@ -16,35 +16,35 @@ CLIPPINGPARAMETER = 0.2
 #Learn rate for actor
 ACTOR_LEARN_RATE = 0.0003
 #Learn rate for critiv
-CRITIC_LEARN_RATE = 0.0001
+CRITIC_LEARN_RATE = 0.001
 #Batch size in optimization for actor and critic
-OPTIMIZATION_BATCH_SIZE = 512
+OPTIMIZATION_BATCH_SIZE = 256
 #Batch size and number of subprocesses for parallel computation of environments
 CREATION_BATCH_SIZE = 8
 #Number of steps taken total in creation of samples for one iteration
-CREATION_EPISODES = 64
+CREATION_EPISODES = 128
 #Gamma value discount
-GAMMA = 0.98
+GAMMA = 0.99
 #Lambda discount for GAE
 GAE_LAMBDA = 0.95
 #Which advantage function to use (Advantage or GAE)
 ADVANTAGE_FUNCTION = 'Generalized_Advantages'
 #Activation function for actions
-ACTION_ACTIVATION = 'tanh'
+ACTION_ACTIVATION = 'softmax'
 #How many iterations to run this
 ITERATIONS = 1000
 #Number of epochs in optimization
 EPOCHS = 5
 #Multiplicative factor for entropy loss
-ENTROPY_LOSS_FACTOR = 0.0001
+ENTROPY_LOSS_FACTOR = 0.01
 #Early stopping stops when approx KL is larget than this
-KL_EARLY_STOPPING = .4
+KL_EARLY_STOPPING = .04
 #How many iterations the early stopping is not used in the beginning
 BURN_IN_ITERATIONS = 5
 #How many steps to use in evaluation (also steps that might be visualized)
-EVALUATION_STEPS = 1050
+EVALUATION_STEPS = 2050
 
-OUTPUT_ACTIVATIONFUNCTIONS = {'tanh' : tf.nn.tanh}
+OUTPUT_ACTIVATIONFUNCTIONS = {'tanh' : tf.nn.tanh, 'softmax': tf.nn.softmax}
 
 #Whether to visualize during evaluation
 VISUALIZE = False
@@ -143,23 +143,23 @@ class PPO_model:
 
         #Input size and output size of network
         self.input_size = len(self.env_function().observation_space.high)
-        self.output_size = len(self.env_function().action_space.high)
+        self.output_size = self.env_function().action_space.n
 
         #The tensorflow model
         self.session = tf.Session()
-        self.actor = Network(self.input_size, actor_description, [{'size': self.output_size,'activation':ACTION_ACTIVATION}, {'size': self.output_size, 'activation': tf.nn.softplus}], 'actor')
+        self.actor = Network(self.input_size, actor_description, [{'size': self.output_size,'activation':ACTION_ACTIVATION}], 'actor')
         self.critic = Network(self.input_size, critic_description, [{'size':1, 'activation':None}], 'critic')
 
         #The list of variables, which should be saved
         self.save_list = self.actor.save_list + self.critic.save_list
 
         # THis has to be normal for the entropy to be correctly computed! If you change this, also change entropy computation
-        self.action_distribution = tfp.distributions.Normal(self.actor.output_list[0], self.actor.output_list[1])
+        self.action_distribution = tfp.distributions.Categorical(probs=self.actor.output_list[0])
         self.value_prediction = self.critic.output_list[0]
 
         #placeholders for training
         self.advantage_placeholder = tf.placeholder(tf.float32, shape=(None), name='advantage_placeholder')
-        self.old_action_placeholder = tf.placeholder(tf.float32, shape=(None, self.output_size), name='old_action_placeholder')
+        self.old_action_placeholder = tf.placeholder(tf.float32, shape=(None), name='old_action_placeholder')
         self.old_log_prob_placeholder = tf.placeholder(tf.float32, shape=(None), name='old_log_prob_placeholder')
         self.value_target_placeholder = tf.placeholder(tf.float32, shape=(None,1), name='value_target_placeholder')
 
@@ -230,9 +230,9 @@ class PPO_model:
         reward_array = np.stack(reward_list)
         print('Landed in this iteration' + str(np.sum(reward_array>80)))
         print('Landed values' + str(reward_array[reward_array>80]))
-        print('actual done values' + str(reward_array[done_array]))
+        #print('actual done values' + str(reward_array[done_array]))
         print('samples with finishing reward ' + str(np.argwhere(reward_array>80)))
-        print('samples actually finished here: ' + str(np.argwhere(done_array)))
+        #print('samples actually finished here: ' + str(np.argwhere(done_array)))
         #self.reward_logger.append(np.mean(reward_array) * np.sqrt(self.normalized_environments.ret_rms.var + self.normalized_environments.epsilon))
         self.reward_logger.append(np.mean(reward_array))
         #normalize reward array
@@ -259,7 +259,7 @@ class PPO_model:
         print(str(num_finished_samples/np.sum(done_array)) + ' steps per run')
 
         observation_array = np.reshape(observation_array, (sample_number, self.input_size))
-        action_array = np.reshape(action_array, (sample_number, self.output_size))
+        action_array = np.reshape(action_array, (sample_number))
         log_prob_array = np.reshape(log_prob_array, (sample_number))
         value_estimate_array = np.reshape(value_estimate_array, (sample_number))
         value_target_array = np.reshape(value_target_array, (sample_number))
@@ -286,8 +286,8 @@ class PPO_model:
         print(reward_array.flatten()[done_array.flatten()])
 
         #This is debug utility
-        print('Targets: Mean: ' + str(np.mean(value_target_array)) + ' Std: ' + str(np.std(value_target_array)))
-        print('Estimates: Mean: ' + str(np.mean(value_estimate_array)) + ' Std: ' + str(np.std(value_estimate_array)))
+        #print('Targets: Mean: ' + str(np.mean(value_target_array)) + ' Std: ' + str(np.std(value_target_array)))
+        #print('Estimates: Mean: ' + str(np.mean(value_estimate_array)) + ' Std: ' + str(np.std(value_estimate_array)))
 
         #Prepare data in a ditionary for ease of use
         data = {'observations':observation_array, 'advantages':advantage_array, 'old_actions':action_array, 'old_log_probs':log_prob_array, 'target_values':value_target_array, 'data_length':num_finished_samples}
@@ -341,6 +341,7 @@ class PPO_model:
             self.update_epoch_logger()
             #Early stopping
             if (approx_kl > KL_EARLY_STOPPING) and self.iteration > BURN_IN_ITERATIONS:
+                print('break cause KL')
                 break
         #Update Logger
         self.update_iteration_logger()
@@ -352,7 +353,7 @@ class PPO_model:
             data (dict) : Has keys: 'observations', 'advantages', 'old_actions', 'old_log_probs', 'target_values', 'data_length', each containing:
                 data['observations'] (ndarray): shape(data_length, observation_size)
                 data['advantages'] (ndarray): shape(data_length)
-                data['old_actions'] (ndarray): shape(data_length, action_size)
+                data['old_actions'] (ndarray): shape(data_length)
                 data['old_log_probs'] (ndarray): shape(data_length)
                 data['target_values'] (ndarray): shape(data_length)
                 data['data_length'] (int) : len of total data sequence
@@ -382,6 +383,8 @@ class PPO_model:
             for data_key, feed_key in zip(data_key_list, placeholder_list):
                 minibatch_dict[feed_key] = data[data_key][start_index:end_index]
             mini_batch_list.append(minibatch_dict)
+        #plt.hist(np.exp(data['old_log_probs']),40)
+        #plt.show()
         return mini_batch_list
 
     def sample_action(self):
@@ -393,29 +396,18 @@ class PPO_model:
         actions = self.action_distribution.sample()
         #Get (logarithmic) probabilites of actions
         log_probs = self.action_distribution.log_prob(actions)
-        #Sum over individual action components (--> Multiplication in log space is addition!)
-        log_probs = tf.reduce_sum(log_probs, -1)
         return actions, log_probs
 
     def value_loss(self):
         #Compute Mean square error for critic training
         value_f_loss = tf.square(self.value_prediction - self.value_target_placeholder)
-        loss = .5 * tf.reduce_mean(value_f_loss)
+        loss = tf.reduce_mean(value_f_loss)
         return loss
-
-    def debug_clipped_ppo_objective(self):
-        #Clipped objective function from PPO Paper
-        #Probability ratio of old and new parameters
-        prob_ratio = tf.exp(tf.reduce_sum(self.action_distribution.log_prob(self.old_action_placeholder), axis=-1)-self.old_log_prob_placeholder)
-        #Compute PPO surrogate objective function
-        clipped_prob_ratio = tf.clip_by_value(prob_ratio, 1-CLIPPINGPARAMETER, 1+CLIPPINGPARAMETER)
-        clipped_objective = tf.minimum(prob_ratio*self.advantage_placeholder, clipped_prob_ratio*self.advantage_placeholder)
-        return clipped_objective
 
     def clipped_ppo_objective(self):
         #Clipped objective function from PPO Paper
         #Probability ratio of old and new parameters
-        prob_ratio = tf.exp(tf.reduce_sum(self.action_distribution.log_prob(self.old_action_placeholder), axis=-1)-self.old_log_prob_placeholder)
+        prob_ratio = tf.exp(self.action_distribution.log_prob(self.old_action_placeholder)-self.old_log_prob_placeholder)
         #Compute PPO surrogate objective function
         clipped_prob_ratio = tf.clip_by_value(prob_ratio, 1-CLIPPINGPARAMETER, 1+CLIPPINGPARAMETER)
         clipped_objective = tf.minimum(prob_ratio*self.advantage_placeholder, clipped_prob_ratio*self.advantage_placeholder)
@@ -435,7 +427,7 @@ class PPO_model:
 
     def approximate_kl_divergence(self):
         #Computes the approximate kl div between old and new log probs for early stopping
-        return [-tf.reduce_mean(tf.reduce_sum(self.action_distribution.log_prob(self.old_action_placeholder), axis=-1) - self.old_log_prob_placeholder)]
+        return [-tf.reduce_mean(self.action_distribution.log_prob(self.old_action_placeholder) - self.old_log_prob_placeholder)]
 
     def feed_dictionary(self, observation, old_action=None, old_log_prob=None, value_target=None):
         #Creates feed dictionaries for training
@@ -540,7 +532,7 @@ class PPO_model:
         assert rewards.shape == value_estimations.shape
         assert rewards.shape == dones.shape
         value_state_t = value_estimations
-        value_state_t_plus_one = np.append(value_estimations, np.zeros((1,CREATION_BATCH_SIZE)), axis=0)[1:]
+        value_state_t_plus_one = np.append(value_estimations, np.zeros((1,CREATION_BATCH_SIZE)), axis=0)[1:,:]
         value_state_t_plus_one[dones] = 0
         deltas = rewards + GAMMA*value_state_t_plus_one - value_state_t
 
@@ -591,7 +583,7 @@ class PPO_model:
 
         for step in range(EVALUATION_STEPS):
             feed_dict = self.feed_dictionary(observation)
-            action, log_prob, value_estimate = self.session.run(fetch_list, feed_dict=feed_dict)
+            action, log_prob, value_estimate, finishing_probs = self.session.run(fetch_list + [self.actor.output_list[0]], feed_dict=feed_dict)
             sigma = self.session.run(self.actor.output_list[-1], feed_dict = feed_dict)
             sigma_list.append(sigma)
             if VISUALIZE:
@@ -599,13 +591,16 @@ class PPO_model:
             self.normalized_environments.step_async(action)
             observation, reward, done, info = self.normalized_environments.step_wait()
             reward_list.append(reward)
+            if np.sum(done) > 0:
+                print('finishing probs ' + str(finishing_probs[done]))
+                print('finising rewards ' + str(reward[done]))
         reward_array = np.stack(reward_list)
         #sigma is interesting as it shows the exploration rate of the algorithm
         return [np.mean(reward_array), np.mean(np.stack(sigma_list),axis=(0,1))]
 
 def main():
-    network_description = [{'size':256, 'activation':tf.nn.tanh}, {'size':256, 'activation':tf.nn.tanh}]
-    trainer = PPO_model(network_description, network_description, 'LunarLanderContinuous-v2')
+    network_description = [{'size':64, 'activation':tf.nn.tanh}, {'size':64, 'activation':tf.nn.tanh}]
+    trainer = PPO_model(network_description, network_description, 'LunarLander-v2')
     evaluations = []
     for i in range(ITERATIONS):
         trainer.train()
@@ -613,14 +608,13 @@ def main():
         print(trainer.reward_logger[-1])
 
         #This is interesting because i can get the mean
-
-        if i%5==0:
+        if i%3==0:
             evaluations.append(trainer.evaluate())
             print('Evaluation (Reward / mean std): ')
             print(evaluations)
 
         #Every eight iterations (CREATION_EPISODES*8 full iterations through the environment) print the progress
-        if i%8==0:
+        if i%20==0:
             plt.subplot(2,2,1)
             plt.title('Rewards')
             plt.plot(trainer.reward_logger)
