@@ -16,15 +16,15 @@ CLIPPINGPARAMETER = 0.2
 #Learn rate for actor
 ACTOR_LEARN_RATE = 0.0003
 #Learn rate for critiv
-CRITIC_LEARN_RATE = 0.0001
+CRITIC_LEARN_RATE = 0.001
 #Batch size in optimization for actor and critic
-OPTIMIZATION_BATCH_SIZE = 512
+OPTIMIZATION_BATCH_SIZE = 256
 #Batch size and number of subprocesses for parallel computation of environments
 CREATION_BATCH_SIZE = 8
 #Number of steps taken total in creation of samples for one iteration
-CREATION_EPISODES = 64
+CREATION_EPISODES = 128
 #Gamma value discount
-GAMMA = 0.98
+GAMMA = 0.99
 #Lambda discount for GAE
 GAE_LAMBDA = 0.95
 #Which advantage function to use (Advantage or GAE)
@@ -36,9 +36,9 @@ ITERATIONS = 1000
 #Number of epochs in optimization
 EPOCHS = 5
 #Multiplicative factor for entropy loss
-ENTROPY_LOSS_FACTOR = 0.0001
+ENTROPY_LOSS_FACTOR = 0.01
 #Early stopping stops when approx KL is larget than this
-KL_EARLY_STOPPING = .4
+KL_EARLY_STOPPING = .04
 #How many iterations the early stopping is not used in the beginning
 BURN_IN_ITERATIONS = 5
 #How many steps to use in evaluation (also steps that might be visualized)
@@ -231,8 +231,8 @@ class PPO_model:
         print('Landed in this iteration' + str(np.sum(reward_array>80)))
         print('Landed values' + str(reward_array[reward_array>80]))
         print('actual done values' + str(reward_array[done_array]))
-        print('samples with finishing reward ' + str(np.argwhere(reward_array>80)))
-        print('samples actually finished here: ' + str(np.argwhere(done_array)))
+        #print('samples with finishing reward ' + str(np.argwhere(reward_array>80)))
+        #print('samples actually finished here: ' + str(np.argwhere(done_array)))
         #self.reward_logger.append(np.mean(reward_array) * np.sqrt(self.normalized_environments.ret_rms.var + self.normalized_environments.epsilon))
         self.reward_logger.append(np.mean(reward_array))
         #normalize reward array
@@ -604,7 +604,7 @@ class PPO_model:
         return [np.mean(reward_array), np.mean(np.stack(sigma_list),axis=(0,1))]
 
 def main():
-    network_description = [{'size':256, 'activation':tf.nn.tanh}, {'size':256, 'activation':tf.nn.tanh}]
+    network_description = [{'size':128, 'activation':tf.nn.tanh}, {'size':256, 'activation':tf.nn.tanh}]
     trainer = PPO_model(network_description, network_description, 'LunarLanderContinuous-v2')
     evaluations = []
     for i in range(ITERATIONS):
@@ -620,7 +620,7 @@ def main():
             print(evaluations)
 
         #Every eight iterations (CREATION_EPISODES*8 full iterations through the environment) print the progress
-        if i%8==0:
+        if i%40==0:
             plt.subplot(2,2,1)
             plt.title('Rewards')
             plt.plot(trainer.reward_logger)

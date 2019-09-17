@@ -20,7 +20,7 @@ CRITIC_LEARN_RATE = 0.001
 #Batch size in optimization for actor and critic
 OPTIMIZATION_BATCH_SIZE = 256
 #Batch size and number of subprocesses for parallel computation of environments
-CREATION_BATCH_SIZE = 8
+CREATION_BATCH_SIZE = 2
 #Number of steps taken total in creation of samples for one iteration
 CREATION_EPISODES = 128
 #Gamma value discount
@@ -51,7 +51,7 @@ VISUALIZE = False
 
 #Network is implementing a feed forward network with possibly several outputs
 class Network:
-    def __init__(self, input_size=None, layers=None, outputs=None, name=None):
+    def __init__(self, input_size=None, layers=None, outputs=None, name=None, graph=tf.get_default_graph()):
         """
         Args:
             input_size (int): Input size used for the input placeholder
@@ -62,6 +62,7 @@ class Network:
                 'size' : number of units in layer
                 'activation': activation function for respective layer
             name (str) : String naming the network
+            graph(tf.Graph) : Graph in which the Network is deployed
         """
 
         self.name = name
@@ -70,23 +71,24 @@ class Network:
         self.output_list = []
 
         #input placeholder
-        self.input_placeholder = tf.placeholder(tf.float32, shape=(None, input_size), name='input_placeholder')
+        with graph.as_default():
+            self.input_placeholder = tf.placeholder(tf.float32, shape=(None, input_size), name=self.name+'input_placeholder')
 
         #Create layers
         for i,layer in enumerate(layers):
             layer_input = self.input_placeholder if i==0 else self.layer_list[-1]
             layer_input_size = input_size if i==0 else layers[i-1]['size']
             layer_name = self.name+'_layer_'+str(i)
-            self.layer_list.append(self._fully_connected_layer(layer_input, layer_input_size, layer['size'], layer['activation'], layer_name))
+            self.layer_list.append(self._fully_connected_layer(layer_input, layer_input_size, layer['size'], layer['activation'], layer_name, graph=graph))
 
         #Create outputs
         for i, output in enumerate(outputs):
             output_name = name+'_output_'+str(i)
-            self.output_list.append(self._fully_connected_layer(self.layer_list[-1], layers[-1]['size'], output['size'], output['activation'], output_name))
+            self.output_list.append(self._fully_connected_layer(self.layer_list[-1], layers[-1]['size'], output['size'], output['activation'], output_name, graph=graph))
 
 
 
-    def _fully_connected_layer(self, input, input_size, size, activation, name):
+    def _fully_connected_layer(self, input, input_size, size, activation, name, graph=tf.get_default_graph()):
 
         """
         Used for Network models, implements a single fully connected layer
@@ -96,29 +98,30 @@ class Network:
         size (int) : number of units in layer
         name(str) : name of layer
         """
-        bias_name = name + '_bias'
-        weights_name = name + '_weights'
+        with graph.as_default():
 
-        bias = tf.get_variable(bias_name, shape=size, initializer=INITIALIZER)
-        weights = tf.get_variable(weights_name, shape=[input_size, size], initializer=INITIALIZER)
+            bias_name = name + '_bias'
+            weights_name = name + '_weights'
 
-        self.save_list.append(bias)
-        self.save_list.append(weights)
+            bias = tf.get_variable(bias_name, shape=size, initializer=INITIALIZER)
+            weights = tf.get_variable(weights_name, shape=[input_size, size], initializer=INITIALIZER)
 
-        linear = tf.matmul(input, weights)
-        drive = linear + bias
+            self.save_list.append(bias)
+            self.save_list.append(weights)
 
-        if activation == None:
-            return linear
-        elif activation in OUTPUT_ACTIVATIONFUNCTIONS:
-            activation_function = OUTPUT_ACTIVATIONFUNCTIONS[activation]
-            return activation_function(linear)
-        else:
-            return activation(drive)
+            linear = tf.matmul(input, weights)
+            drive = linear + bias
 
+            if activation == None:
+                return linear
+            elif activation in OUTPUT_ACTIVATIONFUNCTIONS:
+                activation_function = OUTPUT_ACTIVATIONFUNCTIONS[activation]
+                return activation_function(linear)
+            else:
+                return activation(drive)
 
 class PPO_model:
-    def __init__(self, actor_description, critic_description, env_name, save_file=None):
+    def __init__(self, actor_description, critic_description, env_name, file_name, load_iteration=None):
         """
         Args:
         actor_description (list of dicts): List of layers, where each layers is a dict with keys:
@@ -128,6 +131,8 @@ class PPO_model:
             'size' : number of units in layer
             'activation function': activation function for layer
         """
+        #filename is the place where stuff is saved
+        #self.file_name = file_name
         #Keeping track of iterations run with this model
         self.iteration = 0
         #String used by gym to create environment
@@ -135,7 +140,7 @@ class PPO_model:
 
         #core is a parallelized model of the environments, environments is inside a normalizing wrapper, that uses an updating average
         self.env_core = SubprocVecEnv([self.env_function for env in range(CREATION_BATCH_SIZE)])
-
+        
         #self.normalized_environments = VecNormalize(self.env_core, cliprew = 100.)
         #self.normalized_environments.reset()
         #If you change this back, then oyu also got to change line 218 or so
@@ -146,22 +151,26 @@ class PPO_model:
         self.output_size = self.env_function().action_space.n
 
         #The tensorflow model
-        self.session = tf.Session()
+        self.graph = tf.Graph()
+        self.session = tf.Session(graph=self.graph)
+
+
         self.actor = Network(self.input_size, actor_description, [{'size': self.output_size,'activation':ACTION_ACTIVATION}], 'actor')
         self.critic = Network(self.input_size, critic_description, [{'size':1, 'activation':None}], 'critic')
 
         #The list of variables, which should be saved
         self.save_list = self.actor.save_list + self.critic.save_list
 
-        # THis has to be normal for the entropy to be correctly computed! If you change this, also change entropy computation
-        self.action_distribution = tfp.distributions.Categorical(probs=self.actor.output_list[0])
-        self.value_prediction = self.critic.output_list[0]
+        with self.graph.as_default():
+            # THis has to be normal for the entropy to be correctly computed! If you change this, also change entropy computation
+            self.action_distribution = tfp.distributions.Categorical(probs=self.actor.output_list[0])
+            self.value_prediction = self.critic.output_list[0]
 
-        #placeholders for training
-        self.advantage_placeholder = tf.placeholder(tf.float32, shape=(None), name='advantage_placeholder')
-        self.old_action_placeholder = tf.placeholder(tf.float32, shape=(None), name='old_action_placeholder')
-        self.old_log_prob_placeholder = tf.placeholder(tf.float32, shape=(None), name='old_log_prob_placeholder')
-        self.value_target_placeholder = tf.placeholder(tf.float32, shape=(None,1), name='value_target_placeholder')
+            #placeholders for training
+            self.advantage_placeholder = tf.placeholder(tf.float32, shape=(None), name='advantage_placeholder')
+            self.old_action_placeholder = tf.placeholder(tf.float32, shape=(None), name='old_action_placeholder')
+            self.old_log_prob_placeholder = tf.placeholder(tf.float32, shape=(None), name='old_log_prob_placeholder')
+            self.value_target_placeholder = tf.placeholder(tf.float32, shape=(None,1), name='value_target_placeholder')
 
 
 
@@ -176,13 +185,15 @@ class PPO_model:
 
         #Reward Logger to track training progress
         self.reward_logger = []
+        with self.graph.as_default():
+            self.actor_optimizer = tf.train.AdamOptimizer(ACTOR_LEARN_RATE)
+            self.critic_optimizer = tf.train.AdamOptimizer(CRITIC_LEARN_RATE)
 
-        self.actor_optimizer = tf.train.AdamOptimizer(ACTOR_LEARN_RATE)
-        self.critic_optimizer = tf.train.AdamOptimizer(CRITIC_LEARN_RATE)
+
         self.retrieve_list = self.logger_fetches + self.train_step() + self.approximate_kl_divergence()
 
         #Saving and restoring is not implemented yet.
-        if save_file==None:
+        if load_iteration==None:
             self.session.run(tf.global_variables_initializer())
         else:
             self.restore(save_file)
@@ -228,11 +239,6 @@ class PPO_model:
         log_prob_array = np.stack(log_prob_list)
         value_estimate_array = np.squeeze(np.stack(value_estimate_list))
         reward_array = np.stack(reward_list)
-        print('Landed in this iteration' + str(np.sum(reward_array>80)))
-        print('Landed values' + str(reward_array[reward_array>80]))
-        #print('actual done values' + str(reward_array[done_array]))
-        print('samples with finishing reward ' + str(np.argwhere(reward_array>80)))
-        #print('samples actually finished here: ' + str(np.argwhere(done_array)))
         #self.reward_logger.append(np.mean(reward_array) * np.sqrt(self.normalized_environments.ret_rms.var + self.normalized_environments.epsilon))
         self.reward_logger.append(np.mean(reward_array))
         #normalize reward array
@@ -255,8 +261,8 @@ class PPO_model:
         #Total number of samples
         sample_number = reward_array.size
 
-        print(str(num_finished_samples) + ' out of ' + str(sample_number) + 'usable')
-        print(str(num_finished_samples/np.sum(done_array)) + ' steps per run')
+        #print(str(num_finished_samples) + ' out of ' + str(sample_number) + 'usable')
+        #print(str(num_finished_samples/np.sum(done_array)) + ' steps per run')
 
         observation_array = np.reshape(observation_array, (sample_number, self.input_size))
         action_array = np.reshape(action_array, (sample_number))
@@ -281,19 +287,8 @@ class PPO_model:
         #Output of network has size [Batchsize,1], so this has to be reshaped respectively
         value_target_array = np.expand_dims(value_target_array,-1)
         advantage_array = advantage_array[finished_samples]
-        print('advantages and rewards for final moves')
-        print(advantage_array.flatten()[done_array.flatten()])
-        print(reward_array.flatten()[done_array.flatten()])
-
-        #This is debug utility
-        #print('Targets: Mean: ' + str(np.mean(value_target_array)) + ' Std: ' + str(np.std(value_target_array)))
-        #print('Estimates: Mean: ' + str(np.mean(value_estimate_array)) + ' Std: ' + str(np.std(value_estimate_array)))
-
         #Prepare data in a ditionary for ease of use
         data = {'observations':observation_array, 'advantages':advantage_array, 'old_actions':action_array, 'old_log_probs':log_prob_array, 'target_values':value_target_array, 'data_length':num_finished_samples}
-
-        #update iteration
-        self.iteration = self.iteration + 1
 
         return data
 
@@ -335,17 +330,21 @@ class PPO_model:
                 #print(approx_kl)
                 #Early stopping if KL is too big
                 if (approx_kl > KL_EARLY_STOPPING) and self.iteration > BURN_IN_ITERATIONS :
-                    print('break cause KL')
+                    #print('break cause KL')
                     break
             #Update Logger
             self.update_epoch_logger()
             #Early stopping
             if (approx_kl > KL_EARLY_STOPPING) and self.iteration > BURN_IN_ITERATIONS:
-                print('break cause KL')
+                #print('break cause KL')
                 break
+
+        #update iteration
+        self.iteration = self.iteration + 1
         #Update Logger
         self.update_iteration_logger()
-
+        #save new network
+        self.save(self.file_name)
 
     def generate_minibatches(self, data):
         """
@@ -400,26 +399,29 @@ class PPO_model:
 
     def value_loss(self):
         #Compute Mean square error for critic training
-        value_f_loss = tf.square(self.value_prediction - self.value_target_placeholder)
-        loss = tf.reduce_mean(value_f_loss)
-        return loss
+        with self.graph.as_default():
+            value_f_loss = tf.square(self.value_prediction - self.value_target_placeholder)
+            loss = tf.reduce_mean(value_f_loss)
+            return loss
 
     def clipped_ppo_objective(self):
         #Clipped objective function from PPO Paper
-        #Probability ratio of old and new parameters
-        prob_ratio = tf.exp(self.action_distribution.log_prob(self.old_action_placeholder)-self.old_log_prob_placeholder)
-        #Compute PPO surrogate objective function
-        clipped_prob_ratio = tf.clip_by_value(prob_ratio, 1-CLIPPINGPARAMETER, 1+CLIPPINGPARAMETER)
-        clipped_objective = tf.minimum(prob_ratio*self.advantage_placeholder, clipped_prob_ratio*self.advantage_placeholder)
-        loss = -tf.reduce_mean(clipped_objective)
-        return loss
+        with self.graph.as_default():
+            #Probability ratio of old and new parameters
+            prob_ratio = tf.exp(self.action_distribution.log_prob(self.old_action_placeholder)-self.old_log_prob_placeholder)
+            #Compute PPO surrogate objective function
+            clipped_prob_ratio = tf.clip_by_value(prob_ratio, 1-CLIPPINGPARAMETER, 1+CLIPPINGPARAMETER)
+            clipped_objective = tf.minimum(prob_ratio*self.advantage_placeholder, clipped_prob_ratio*self.advantage_placeholder)
+            loss = -tf.reduce_mean(clipped_objective)
+            return loss
 
     def approx_entropy_loss(self):
         #This is motivated by OpenAI baselines
-        entropy = tf.reduce_mean(self.action_distribution.entropy())
-        #entropy = - tf.reduce_mean(self.action_distribution.log_prob(self.old_action_placeholder))
-        entropy_loss = - entropy
-        return entropy_loss
+        with self.graph.as_default():
+            entropy = tf.reduce_mean(self.action_distribution.entropy())
+            #entropy = - tf.reduce_mean(self.action_distribution.log_prob(self.old_action_placeholder))
+            entropy_loss = - entropy
+            return entropy_loss
 
     def policy_loss(self):
         #Policy loss is sum of surrogate objective and entropy loss, is used to optimize the actor
@@ -554,7 +556,9 @@ class PPO_model:
 
     #Still has to be implemented, is in TODO
     def save(self, file_name):
-        stub = None
+        saver = tf.train.Saver(var_list=self.save_list, max_to_keep=9999)
+        print(saver.save(sess=self.session, save_path=file_name, global_step=self.iteration))
+
     #Still has to be implemented, is in TODO
     def restore(self, file_name):
         stub = None
@@ -591,16 +595,13 @@ class PPO_model:
             self.normalized_environments.step_async(action)
             observation, reward, done, info = self.normalized_environments.step_wait()
             reward_list.append(reward)
-            if np.sum(done) > 0:
-                print('finishing probs ' + str(finishing_probs[done]))
-                print('finising rewards ' + str(reward[done]))
         reward_array = np.stack(reward_list)
         #sigma is interesting as it shows the exploration rate of the algorithm
         return [np.mean(reward_array), np.mean(np.stack(sigma_list),axis=(0,1))]
 
 def main():
     network_description = [{'size':64, 'activation':tf.nn.tanh}, {'size':64, 'activation':tf.nn.tanh}]
-    trainer = PPO_model(network_description, network_description, 'LunarLander-v2')
+    trainer = PPO_model(network_description, network_description, 'LunarLander-v2', 'saves/LunarLander_Saves')
     evaluations = []
     for i in range(ITERATIONS):
         trainer.train()
